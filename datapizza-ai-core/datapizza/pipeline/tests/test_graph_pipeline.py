@@ -122,6 +122,62 @@ def test_graph_pipeline_with_stream():
     assert isinstance(next(result.get("generator")), ClientResponse)
 
 
+def test_dag_pipeline_data_isolation():
+    """Test that nodes receive isolated copies of data to prevent side effects."""
+
+    class ProducerNode(PipelineComponent):
+        def _run(self):
+            # Produce a mutable dict
+            return {"shared_data": ["item1", "item2"], "counter": 0}
+
+        async def _a_run(self):
+            return {"shared_data": ["item1", "item2"], "counter": 0}
+
+    class MutatingNode(PipelineComponent):
+        def _run(self, data):
+            # Mutate the received data
+            data["shared_data"].append("mutated_by_B")
+            data["counter"] = 100
+            return "B_result"
+
+        async def _a_run(self, data):
+            data["shared_data"].append("mutated_by_B")
+            data["counter"] = 100
+            return "B_result"
+
+    class ConsumerNode(PipelineComponent):
+        def _run(self, data):
+            # Return the data as-is to verify it wasn't mutated by MutatingNode
+            return data
+
+        async def _a_run(self, data):
+            return data
+
+    producer = ProducerNode()
+    mutating = MutatingNode()
+    consumer = ConsumerNode()
+
+    pipeline = DagPipeline()
+    pipeline.add_module("producer", producer)
+    pipeline.add_module("mutating_node", mutating)
+    pipeline.add_module("consumer_node", consumer)
+
+    # Both mutating_node and consumer_node receive data from producer
+    pipeline.connect("producer", "mutating_node", target_key="data")
+    pipeline.connect("producer", "consumer_node", target_key="data")
+
+    result = pipeline.run({})
+
+    # Verify producer output
+    assert result["producer"]["shared_data"] == ["item1", "item2"]
+    assert result["producer"]["counter"] == 0
+
+    # Verify consumer_node received unmodified data (deepcopy prevents mutation)
+    assert result["consumer_node"]["shared_data"] == ["item1", "item2"]
+    assert result["consumer_node"]["counter"] == 0
+    assert "mutated_by_B" not in result["consumer_node"]["shared_data"]
+
+
 # def test_graph_pipeline_with_a_stream():
 #     pipeline = DagPipeline()
 #
